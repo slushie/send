@@ -14,6 +14,12 @@ in your application or framework.
 
 Looking to serve up entire folders mapped to URLs? Try [serve-static](https://www.npmjs.org/package/serve-static).
 
+## Changes
+
+This repository changes some key functionality of the upstream `send` module,
+in order to be more asynchronous, especially w.r.t. `stat` calls.
+
+
 ## Installation
 
 ```bash
