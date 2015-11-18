@@ -16,6 +16,7 @@ var createError = require('http-errors')
 var debug = require('debug')('send')
 var deprecate = require('depd')('send')
 var destroy = require('destroy')
+var Q = require('q')
 var escapeHtml = require('escape-html')
   , parseRange = require('range-parser')
   , Stream = require('stream')
@@ -137,6 +138,8 @@ function SendStream(req, path, options) {
   if (!this._root && opts.from) {
     this.from(opts.from)
   }
+
+  this._stat = [];
 }
 
 /**
@@ -500,7 +503,11 @@ SendStream.prototype.pipe = function(res){
     return res;
   }
 
-  this.sendFile(path);
+  this.stat(path).spread(function pathStat(path, stat) {
+    if (path && stat)
+      return self.send(path, stat);
+  });
+
   return res;
 };
 
@@ -525,7 +532,7 @@ SendStream.prototype.send = function(path, stat){
     return this.headersAlreadySent();
   }
 
-  debug('pipe "%s"', path)
+  debug('send "%s"', path)
 
   // set header fields
   this.setHeader(path, stat);
@@ -642,6 +649,105 @@ SendStream.prototype.sendFile = function sendFile(path) {
     })
   }
 }
+
+/**
+ * Stat a path, with optional extensions.
+ *
+ * @param {string} path
+ * @return {Q.Promise<Array<string, object>>} a promise for [path, stat]
+ */
+SendStream.prototype.stat = function stat(path) {
+  var self = this,
+      canonical = true,
+      paths = !extname(path) ? [] : this._extensions.map(addExtension);
+
+  paths.unshift(path);
+
+  return Q.try(statNextPath);
+
+  function addExtension(ext) {
+    return path + '.' + ext
+  }
+
+  function statNextPath() {
+    path = paths.shift();
+
+    debug('stat "%s"', path);
+
+    return Q.ninvoke(fs, 'stat', path)
+      .then(handleStat)
+      .fail(statFailed);
+  }
+
+  function handleStat(stat) {
+    if (stat.isDirectory()) {
+      if (canonical) 
+        self.redirect(self.path);
+      else
+        self.error(404);
+      return [];
+    }
+
+    return self._mutateStat(path, stat).then(emitFile);
+  }
+
+  function emitFile(stat) {
+    self.emit('file', path, stat);
+    
+    return Q([path, stat]);
+  }
+
+  function statFailed(err) {
+    canonical = false;
+
+    if (err.code === 'ENOENT' && paths.length) {
+      return Q.try(statNextPath);
+    }
+    else {
+      self.onStatError(err);
+      throw err;
+    }
+  }
+
+};
+
+/**
+ * Add a mutator for the path stat data.
+ * 
+ * @param {Function} handler - function(path, stat, next)
+ */
+SendStream.prototype.onStat = function onStat(handler) {
+  if (!~this._stat.indexOf(handler)) this._stat.push(handler);
+  return this;
+};
+
+/**
+ * Call the stat mutators, callback style. 
+ * Returns a promise to the last `stat` sent to `next`.
+ *
+ * @api private
+ */
+SendStream.prototype._mutateStat = function _mutateStat(path, stat) {
+  var handlers = this._stat.slice(),
+      deferred = Q.defer();
+
+  next(null, stat);
+  return deferred.promise;
+
+  function next(err, stat) {
+    var handler = handlers.shift();
+
+    if (err) {
+      deferred.reject(err);
+    }
+    else if (handler) {
+      handler(path, stat, next);
+    }
+    else {
+      deferred.resolve(stat);
+    }
+  }
+};
 
 /**
  * Transfer index for `path`.
